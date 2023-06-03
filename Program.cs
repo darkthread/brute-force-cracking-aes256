@@ -1,4 +1,5 @@
 ﻿using System.Diagnostics;
+using System.Threading.Channels;
 
 int pwdLength = 3;
 string pwdCharSet = "*"; // N-Number, A-AlphaDigit, *-Any
@@ -37,30 +38,62 @@ Console.WriteLine($"AES加密內容: {BitConverter.ToString(ecn.data.Take(32).To
 Console.WriteLine($"AES-CBC IV: {BitConverter.ToString(ecn.iv)}");
 
 var cts = new CancellationTokenSource();
+var token = cts.Token;
 var sw = new Stopwatch();
 var startTime = DateTime.Now;
-var total = Math.Pow(pwdChars.Length, pwdLength);
-var queued = 0;
-ThreadPool.SetMinThreads(Environment.ProcessorCount * 4, 16);
+long total = Enumerable.Range(1, pwdLength).Sum(i => Convert.ToInt64(Math.Pow(pwdChars.Length, i)));
+long queued = 0;
+long completed = 0;
+Func<bool> done = () => completed >= total;
+
+var channel = Channel.CreateBounded<string>(65536 * 64);
 Task.Run(() =>
     {
-
         // 檢查 CancellationTokenSource 是否已經被取消
-        while (!cts.Token.IsCancellationRequested)
+        while (!token.IsCancellationRequested)
         {
             Console.CursorLeft = 0;
-            Console.Write($"{(DateTime.Now - startTime).TotalSeconds,3:n0}s | {ThreadPool.ThreadCount,7} | {ThreadPool.PendingWorkItemCount,7}");
+            Console.Write($"{(DateTime.Now - startTime).TotalSeconds,3:n0}s | {queued:n0} | {completed:n0}/{total:n0} {completed * 1.0 / total:p0}");
+            if (done()) cts.Cancel();
             Thread.Sleep(1000);
         }
-    }, 
-    cts.Token //允許還沒執行前取消(例如：還在 Queue 排隊時就取消)
+    },
+    token //允許還沒執行前取消(例如：還在 Queue 排隊時就取消)
 );
-var tasks = new List<Task>();
+var consumers = Enumerable.Range(1, Environment.ProcessorCount).Select(o => Task.Run(async () =>
+{
+    try
+    {
+        while (await channel.Reader.WaitToReadAsync(token))
+        {
+            var pwd = await channel.Reader.ReadAsync(token);
+            if (!token.IsCancellationRequested)
+            {
+                try
+                {
+                    var dec = CodecNetFx.AesDecrypt(pwd, ecn.data, ecn.iv);
+                    if (dec.SequenceEqual(plain))
+                    {
+                        Console.WriteLine($"取得密碼：{pwd}");
+                    }
+                }
+                catch { }
+                finally
+                {
+                    Interlocked.Increment(ref completed);
+                }
+            }
+        }
+    }
+    catch (OperationCanceledException) { 
+    }
+})).ToArray();
+
+
 sw.Start();
 explore(string.Empty);
-
-
-Task.WaitAll(tasks.ToArray());
+// channel.Writer.Complete();
+Task.WaitAll(consumers);
 Console.WriteLine();
 cts.Cancel();
 sw.Stop();
@@ -68,34 +101,19 @@ Console.WriteLine($"嘗試所有組合耗時: {sw.ElapsedMilliseconds:n0}ms");
 
 
 // DFS 產生所有組合
-void explore(string pfx)
+async Task explore(string pfx)
 {
     var pwd = pfx;
     if (!string.IsNullOrEmpty(pwd))
     {
-        // 雖然 ThreadPool 待處理 Work Item 沒有上限，但為避免耗用過多資源，加上限制
-        while (ThreadPool.PendingWorkItemCount > 65535)
-        {
-            Thread.Sleep(10);
-        }
         queued++;
-        tasks.Add(Task.Run(() =>
-        {
-            try
-            {
-                var dec = CodecNetFx.AesDecrypt(pwd, ecn.data, ecn.iv);
-                if (dec.SequenceEqual(plain))
-                {
-                    Console.WriteLine($"取得密碼：{pwd}");
-                }
-            }
-            catch { }
-        }));
+        if (await channel.Writer.WaitToWriteAsync())
+            channel.Writer.TryWrite(pwd);
     }
     if (pfx.Length < pwdLength)
         foreach (var c in pwdChars)
         {
-            explore(pfx + c);
+            await explore(pfx + c);
         }
 }
 
