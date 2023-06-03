@@ -2,10 +2,16 @@
 
 int pwdLength = 3;
 string pwdCharSet = "*"; // N-Number, A-AlphaDigit, *-Any
+int minThreads = Environment.ProcessorCount * 4;
+int maxQueueItems = 65536;
 if (args.Length > 0)
     int.TryParse(args[0], out pwdLength);
 if (args.Length > 1)
     pwdCharSet = args[1];
+if (args.Length > 2)
+    int.TryParse(args[2], out minThreads);
+if (args.Length > 3)
+    int.TryParse(args[3], out maxQueueItems);
 
 // 密碼字元範圍：ASCII 32~126
 char[] pwdChars;
@@ -32,8 +38,10 @@ Console.WriteLine("SAH256 產生 AES256 金鑰暴力破解測試");
 Console.ResetColor();
 Console.WriteLine($"密碼長度: {pwdLength}");
 Console.WriteLine($"可用密碼字元: {new string(pwdChars)}");
+Console.ForegroundColor = ConsoleColor.Green;
 Console.WriteLine($"隨機密碼: {password}");
-Console.WriteLine($"AES加密內容: {BitConverter.ToString(ecn.data.Take(32).ToArray())}...");
+Console.ResetColor();
+Console.WriteLine($"AES加密內容: {BitConverter.ToString(ecn.data.Take(16).ToArray())}...");
 Console.WriteLine($"AES-CBC IV: {BitConverter.ToString(ecn.iv)}");
 
 var cts = new CancellationTokenSource();
@@ -42,7 +50,7 @@ var startTime = DateTime.Now;
 long total = Enumerable.Range(1, pwdLength).Sum(i => Convert.ToInt64(Math.Pow(pwdChars.Length, i)));
 long queued = 0;
 long completed = 0;
-ThreadPool.SetMinThreads(Environment.ProcessorCount * 4, 16);
+ThreadPool.SetMinThreads(minThreads, 16);
 Task.Run(() =>
     {
 
@@ -64,7 +72,10 @@ Task.WaitAll(tasks.ToArray());
 Console.WriteLine();
 cts.Cancel();
 sw.Stop();
-Console.WriteLine($"已嘗試{completed:n0}種組合，耗時: {sw.ElapsedMilliseconds:n0}ms");
+Console.Write($"已嘗試{completed:n0}種組合，");
+Console.ForegroundColor = ConsoleColor.Cyan;
+Console.WriteLine($"耗時: {sw.ElapsedMilliseconds:n0}ms");
+Console.ResetColor();
 
 
 // DFS 產生所有組合
@@ -74,7 +85,7 @@ void explore(string pfx)
     if (!string.IsNullOrEmpty(pwd))
     {
         // 雖然 ThreadPool 待處理 Work Item 沒有上限，但為避免耗用過多資源，加上限制
-        while (ThreadPool.PendingWorkItemCount > 65535)
+        while (ThreadPool.PendingWorkItemCount > maxQueueItems)
         {
             Thread.Sleep(1);
         }
@@ -86,7 +97,9 @@ void explore(string pfx)
                 var dec = CodecNetFx.AesDecrypt(pwd, ecn.data, ecn.iv);
                 if (dec.SequenceEqual(plain))
                 {
-                    Console.WriteLine($"取得密碼：{pwd}");
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine($" ** 發現密碼：{pwd} **");
+                    Console.ResetColor();
                 }
             }
             catch { }
@@ -97,9 +110,10 @@ void explore(string pfx)
         }));
     }
     if (pfx.Length < pwdLength)
+    {
         foreach (var c in pwdChars)
         {
             explore(pfx + c);
         }
+    }
 }
-
